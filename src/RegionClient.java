@@ -27,6 +27,8 @@
 package org.hbase.async;
 
 import java.net.SocketAddress;
+import java.security.Principal;
+import java.security.PrivilegedExceptionAction;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
@@ -56,6 +58,19 @@ import org.slf4j.LoggerFactory;
 
 import com.stumbleupon.async.Callback;
 import com.stumbleupon.async.Deferred;
+
+import javax.security.auth.Subject;
+import javax.security.auth.callback.CallbackHandler;
+import javax.security.auth.callback.NameCallback;
+import javax.security.auth.callback.PasswordCallback;
+import javax.security.auth.callback.UnsupportedCallbackException;
+import javax.security.auth.login.LoginContext;
+import javax.security.auth.login.LoginException;
+import javax.security.sasl.AuthorizeCallback;
+import javax.security.sasl.RealmCallback;
+import javax.security.sasl.Sasl;
+import javax.security.sasl.SaslClient;
+import javax.security.sasl.SaslException;
 
 /**
  * Stateful handler that manages a connection to a specific RegionServer.
@@ -175,6 +190,12 @@ final class RegionClient extends ReplayingDecoder<VoidEnum> {
    */
   private final AtomicInteger rpcid = new AtomicInteger(-1);
 
+  private final boolean useSecure = true;
+
+  private SaslHelper saslHelper;
+  private final String host;
+
+
   private final TimerTask flush_timer = new TimerTask() {
     public void run(final Timeout timeout) {
       periodicFlush();
@@ -197,8 +218,9 @@ final class RegionClient extends ReplayingDecoder<VoidEnum> {
    * Constructor.
    * @param hbase_client The HBase client this instance belongs to.
    */
-  public RegionClient(final HBaseClient hbase_client) {
+  public RegionClient(final HBaseClient hbase_client, String host) {
     this.hbase_client = hbase_client;
+    this.host = host;
   }
 
   /**
@@ -475,8 +497,10 @@ final class RegionClient extends ReplayingDecoder<VoidEnum> {
       // 2nd param: what protocol version to speak.  If we don't know what the
       // server expects, try an old version first (0.90 and before).
       // Otherwise tell the server we speak the same version as it does.
-      writeHBaseLong(buf, server_version == SERVER_VERSION_UNKNWON
-                     ?  SERVER_VERSION_090_AND_BEFORE : server_version);
+//TODO hack
+//      writeHBaseLong(buf, server_version == SERVER_VERSION_UNKNWON
+//                     ?  SERVER_VERSION_090_AND_BEFORE : server_version);
+      writeHBaseLong(buf, 29l);
       return buf;
     }
   };
@@ -899,6 +923,9 @@ final class RegionClient extends ReplayingDecoder<VoidEnum> {
     final ChannelBuffer header;
     if (System.getProperty("org.hbase.async.cdh3b3") != null) {
       header = headerCDH3b3();
+    } else if(useSecure) {
+      saslHelper = new SaslHelper(host);
+      header = secureHeader092();
     } else {
       header = header090();
     }
@@ -1154,6 +1181,31 @@ final class RegionClient extends ReplayingDecoder<VoidEnum> {
     final long start = System.nanoTime();
     LOG.debug("------------------>> ENTERING DECODE >>------------------");
     final int rpcid = buf.readInt();
+    LOG.debug(String.format("rpcid: %d", rpcid));
+    if(useSecure && rpcid == -33) {
+      if(!saslHelper.isComplete()) {
+        if(!saslHelper.handleResponse(buf, chan)) {
+          return null;
+        }
+        final GetProtocolVersionRequest rpc = new GetProtocolVersionRequest();
+        rpc.getDeferred().addBoth(new ProtocolVersionCB(chan));
+        Channels.write(chan, encode(rpc));
+      } else {
+        //hack right now, just swallow server response
+        int state = buf.readInt();
+        //0 is success
+        LOG.debug("Got state=" + state);
+        if(state != 0) {
+          return false;
+        }
+        //read state
+        int len = buf.readInt();
+        //0 is success
+        LOG.debug("Got len="+len);
+        LOG.debug("-->"+Bytes.pretty(buf.readBytes(len).array()));
+        return null;
+      }
+    }
     final Object decoded = deserialize(buf, rpcid);
     final HBaseRpc rpc = rpcs_inflight.remove(rpcid);
     if (LOG.isDebugEnabled()) {
@@ -1211,7 +1263,8 @@ final class RegionClient extends ReplayingDecoder<VoidEnum> {
     //   0x00  Old style success (prior 0.92).
     //   0x01  RPC failed with an exception.
     //   0x02  New style success (0.92 and above).
-    final byte flags = buf.readByte();
+    final int flags = buf.readInt();
+    LOG.debug(String.format("flag: %x", flags));
     if ((flags & HBaseRpc.RPC_FRAMED) != 0) {
       // Total size of the response, including the RPC ID (4 bytes) and flags
       // (1 byte) that we've already read, including the 4 bytes used by
@@ -1232,7 +1285,7 @@ final class RegionClient extends ReplayingDecoder<VoidEnum> {
     }
 
     final HBaseRpc rpc = rpcs_inflight.get(rpcid);
-    if ((flags & HBaseRpc.RPC_ERROR) != 0) {
+    if (flags != 0) {
       return deserializeException(buf, rpc);
     }
     try {
@@ -1270,7 +1323,9 @@ final class RegionClient extends ReplayingDecoder<VoidEnum> {
   @SuppressWarnings("fallthrough")
   static Object deserializeObject(final ChannelBuffer buf,
                                   final HBaseRpc request) {
-    switch (buf.readByte()) {  // Read the type of the response.
+    byte b = buf.readByte();
+    LOG.debug(String.format("object: %x", b));
+    switch (b) {  // Read the type of the response.
       case  1:  // Boolean
         return buf.readByte() != 0x00;
       case  6:  // Long
@@ -1477,6 +1532,8 @@ final class RegionClient extends ReplayingDecoder<VoidEnum> {
 
   /** Initial part of the header.  */
   private final static byte[] HRPC3 = new byte[] { 'h', 'r', 'p', 'c', 3 };
+  /** Initial part of the secure header.  */
+  private final static byte[] SRPC4 = new byte[] { 's', 'r', 'p', 'c', 4 };
 
   /** Common part of the hello header: magic + version.  */
   private ChannelBuffer commonHeader(final byte[] buf, final byte[] hrpc) {
@@ -1487,6 +1544,28 @@ final class RegionClient extends ReplayingDecoder<VoidEnum> {
     // "hrpc" followed by the version.
     // See HBaseServer#HEADER and HBaseServer#CURRENT_VERSION.
     header.writeBytes(hrpc);  // 4 + 1
+    return header;
+  }
+
+  /** Hello header for HBase 0.92 and later.  */
+  private ChannelBuffer secureHeader092() {
+    byte[] buf = new byte[4 + 1 + 1 + 4 + 1 + 44];
+    final ChannelBuffer header = commonHeader(buf, SRPC4);
+
+
+    //authmethod 81=kerberos
+    header.writeByte(81);
+    // Serialized ipc.ConnectionHeader
+    // We skip 4 bytes now and will set it to the actual size at the end.
+    header.writerIndex(header.writerIndex() + 4);  // 4
+    final String klass = "org.apache.hadoop.hbase.ipc.HRegionInterface";
+    header.writeByte(klass.length());              // 1
+    header.writeBytes(Bytes.ISO88591(klass));      // 44
+
+    // Now set the length of the whole damn thing.
+    // -4 because the length itself isn't part of the payload.
+    // -5 because the "hrpc" + version isn't part of the payload.
+    header.setInt(5, header.writerIndex() - 4 - 6);
     return header;
   }
 
@@ -1571,7 +1650,14 @@ final class RegionClient extends ReplayingDecoder<VoidEnum> {
   private void helloRpc(final Channel chan, final ChannelBuffer header) {
     final GetProtocolVersionRequest rpc = new GetProtocolVersionRequest();
     rpc.getDeferred().addBoth(new ProtocolVersionCB(chan));
-    Channels.write(chan, ChannelBuffers.wrappedBuffer(header, encode(rpc)));
+
+    if(useSecure) {
+      saslHelper.sendHello(chan);
+    } else {
+      Channels.write(chan, ChannelBuffers.wrappedBuffer(header, encode(rpc)));
+    }
   }
+
+
 
 }

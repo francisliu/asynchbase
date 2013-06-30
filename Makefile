@@ -80,6 +80,11 @@ asynchbase_SOURCES := \
 	src/UnknownRowLockException.java	\
 	src/UnknownScannerException.java	\
 	src/VersionMismatchException.java	\
+	src/SaslHelper.java	\
+	src/Login.java	\
+	src/Shell.java	\
+	src/KerberosName.java	\
+	src/KerberosUtil.java	\
 	src/jsr166e/LongAdder.java	\
 	src/jsr166e/Striped64.java	\
 
@@ -143,6 +148,7 @@ test_classes_with_nested_classes := $(test_classes:$(top_builddir)/%.class=%*.cl
 
 run: $(test_classes)
 	@test -n "$(CLASS)" || { echo 'usage: $(MAKE) run CLASS=<name>'; exit 1; }
+	echo "$(JAVA) -ea -esa $(JVM_ARGS) -cp "$(get_runtime_dep_classpath):$(top_builddir)" $(package).test.$(CLASS) $(ARGS)"
 	$(JAVA) -ea -esa $(JVM_ARGS) -cp "$(get_runtime_dep_classpath):$(top_builddir)" $(package).test.$(CLASS) $(ARGS)
 
 cli:
