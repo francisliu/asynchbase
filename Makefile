@@ -80,7 +80,7 @@ asynchbase_SOURCES := \
 	src/UnknownRowLockException.java	\
 	src/UnknownScannerException.java	\
 	src/VersionMismatchException.java	\
-	src/SaslHelper.java	\
+	src/SecurityHelper.java	\
 	src/Login.java	\
 	src/Shell.java	\
 	src/KerberosName.java	\

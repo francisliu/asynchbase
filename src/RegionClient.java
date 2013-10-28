@@ -26,9 +26,6 @@
  */
 package org.hbase.async;
 
-import java.net.SocketAddress;
-import java.security.Principal;
-import java.security.PrivilegedExceptionAction;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
@@ -58,19 +55,6 @@ import org.slf4j.LoggerFactory;
 
 import com.stumbleupon.async.Callback;
 import com.stumbleupon.async.Deferred;
-
-import javax.security.auth.Subject;
-import javax.security.auth.callback.CallbackHandler;
-import javax.security.auth.callback.NameCallback;
-import javax.security.auth.callback.PasswordCallback;
-import javax.security.auth.callback.UnsupportedCallbackException;
-import javax.security.auth.login.LoginContext;
-import javax.security.auth.login.LoginException;
-import javax.security.sasl.AuthorizeCallback;
-import javax.security.sasl.RealmCallback;
-import javax.security.sasl.Sasl;
-import javax.security.sasl.SaslClient;
-import javax.security.sasl.SaslException;
 
 /**
  * Stateful handler that manages a connection to a specific RegionServer.
@@ -190,9 +174,9 @@ final class RegionClient extends ReplayingDecoder<VoidEnum> {
    */
   private final AtomicInteger rpcid = new AtomicInteger(-1);
 
-  private final boolean useSecure = true;
+  private boolean useSecure = true;
 
-  private SaslHelper saslHelper;
+  private SecurityHelper securityHelper;
   private final String host;
 
 
@@ -497,10 +481,8 @@ final class RegionClient extends ReplayingDecoder<VoidEnum> {
       // 2nd param: what protocol version to speak.  If we don't know what the
       // server expects, try an old version first (0.90 and before).
       // Otherwise tell the server we speak the same version as it does.
-//TODO hack
-//      writeHBaseLong(buf, server_version == SERVER_VERSION_UNKNWON
-//                     ?  SERVER_VERSION_090_AND_BEFORE : server_version);
-      writeHBaseLong(buf, 29l);
+      writeHBaseLong(buf, server_version == SERVER_VERSION_UNKNWON
+                     ?  SERVER_VERSION_090_AND_BEFORE : server_version);
       return buf;
     }
   };
@@ -543,6 +525,7 @@ final class RegionClient extends ReplayingDecoder<VoidEnum> {
           + (v <= 0 ? "negative" : "too large") + " value", version);
       }
       server_version = (byte) v;
+      System.out.println("-->got server version:"+server_version);
       // The following line will make this client no longer queue incoming
       // RPCs, as we're now ready to communicate with the server.
       RegionClient.this.chan = this.chan;  // Volatile write.
@@ -921,15 +904,18 @@ final class RegionClient extends ReplayingDecoder<VoidEnum> {
                                final ChannelStateEvent e) {
     final Channel chan = e.getChannel();
     final ChannelBuffer header;
-    if (System.getProperty("org.hbase.async.cdh3b3") != null) {
-      header = headerCDH3b3();
-    } else if(useSecure) {
-      saslHelper = new SaslHelper(host);
-      header = secureHeader092();
+    if(System.getProperty("org.hbase.async.security") != null) {
+      useSecure = true;
+      securityHelper = new SecurityHelper(this, host);
+      securityHelper.sendHello(chan);
     } else {
-      header = header090();
+      if (System.getProperty("org.hbase.async.cdh3b3") != null) {
+        header = headerCDH3b3();
+      } else {
+        header = header090();
+      }
+      helloRpc(chan, header);
     }
-    helloRpc(chan, header);
   }
 
   /**
@@ -1084,7 +1070,7 @@ final class RegionClient extends ReplayingDecoder<VoidEnum> {
    * @return The buffer to write to the channel or {@code null} if there was
    * an error and there's nothing to write.
    */
-  private ChannelBuffer encode(final HBaseRpc rpc) {
+  ChannelBuffer encode(final HBaseRpc rpc) {
     if (!rpc.hasDeferred()) {
       throw new AssertionError("Should never happen!  rpc=" + rpc);
     }
@@ -1180,32 +1166,12 @@ final class RegionClient extends ReplayingDecoder<VoidEnum> {
     final int rdx = buf.readerIndex();
     final long start = System.nanoTime();
     LOG.debug("------------------>> ENTERING DECODE >>------------------");
-    final int rpcid = buf.readInt();
-    LOG.debug(String.format("rpcid: %d", rpcid));
-    if(useSecure && rpcid == -33) {
-      if(!saslHelper.isComplete()) {
-        if(!saslHelper.handleResponse(buf, chan)) {
-          return null;
-        }
-        final GetProtocolVersionRequest rpc = new GetProtocolVersionRequest();
-        rpc.getDeferred().addBoth(new ProtocolVersionCB(chan));
-        Channels.write(chan, encode(rpc));
-      } else {
-        //hack right now, just swallow server response
-        int state = buf.readInt();
-        //0 is success
-        LOG.debug("Got state=" + state);
-        if(state != 0) {
-          return false;
-        }
-        //read state
-        int len = buf.readInt();
-        //0 is success
-        LOG.debug("Got len="+len);
-        LOG.debug("-->"+Bytes.pretty(buf.readBytes(len).array()));
+    if(useSecure) {
+      if(securityHelper.handleResponse(buf, chan)) {
         return null;
       }
     }
+    final int rpcid = buf.readInt();
     final Object decoded = deserialize(buf, rpcid);
     final HBaseRpc rpc = rpcs_inflight.remove(rpcid);
     if (LOG.isDebugEnabled()) {
@@ -1264,7 +1230,7 @@ final class RegionClient extends ReplayingDecoder<VoidEnum> {
     //   0x01  RPC failed with an exception.
     //   0x02  New style success (0.92 and above).
     final int flags = buf.readInt();
-    LOG.debug(String.format("flag: %x", flags));
+    LOG.debug(String.format("deserialize:flag: %x", flags));
     if ((flags & HBaseRpc.RPC_FRAMED) != 0) {
       // Total size of the response, including the RPC ID (4 bytes) and flags
       // (1 byte) that we've already read, including the 4 bytes used by
@@ -1651,11 +1617,14 @@ final class RegionClient extends ReplayingDecoder<VoidEnum> {
     final GetProtocolVersionRequest rpc = new GetProtocolVersionRequest();
     rpc.getDeferred().addBoth(new ProtocolVersionCB(chan));
 
-    if(useSecure) {
-      saslHelper.sendHello(chan);
-    } else {
-      Channels.write(chan, ChannelBuffers.wrappedBuffer(header, encode(rpc)));
-    }
+    Channels.write(chan, ChannelBuffers.wrappedBuffer(header, encode(rpc)));
+  }
+
+  void sendVersion(final Channel chan) {
+    final GetProtocolVersionRequest rpc = new GetProtocolVersionRequest();
+    rpc.getDeferred().addBoth(new ProtocolVersionCB(chan));
+
+    Channels.write(chan, encode(rpc));
   }
 
 
