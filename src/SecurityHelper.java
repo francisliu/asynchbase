@@ -28,11 +28,12 @@ import java.security.PrivilegedExceptionAction;
 import java.util.Map;
 import java.util.TreeMap;
 
-final class SecurityHelper implements ChannelFutureListener {
+final class SecurityHelper {
 
   private static final Logger LOG = LoggerFactory.getLogger(RegionClient.class);
   public static final String SECURITY_AUTHENTICATION_KEY = "hbase.security.authentication";
   public static final String REGIONSERVER_PRINCIPAL_KEY = "hbase.kerberos.regionserver.principal";
+  public static final String RPC_QOP_KEY = "hbase.rpc.protection";
 
   private static int SASL_RPC_ID = -33;
 
@@ -40,12 +41,12 @@ final class SecurityHelper implements ChannelFutureListener {
   private final String clientPrincipalName;
   private final Login clientLogin;
 
-  private volatile boolean saslCompleted = false;
-
   private RegionClient regionClient;
 
+  private volatile boolean useWrap = false;
+
   public SecurityHelper(RegionClient regionClient, String iphost) {
-    String host = null;
+    String host;
     this.regionClient = regionClient;
 
     //Login if needed
@@ -78,7 +79,7 @@ final class SecurityHelper implements ChannelFutureListener {
       final Map<String, String> props =
         new TreeMap<String, String>();
       //sasl configuration
-      props.put(Sasl.QOP, "auth");
+      props.put(Sasl.QOP, parseQOP());
       props.put(Sasl.SERVER_AUTH, "true");
 
       saslClient = Subject.doAs(clientLogin.getSubject(),
@@ -97,6 +98,22 @@ final class SecurityHelper implements ChannelFutureListener {
       throw new IllegalStateException("Error creating SASL client", e);
     }
   }
+
+  private String parseQOP() {
+    String protection = System.getProperty(RPC_QOP_KEY, "authentication");
+
+    if("integrity".equals(protection)) {
+      return "auth-int";
+    }
+    if("privacy".equals(protection)) {
+      return "auth-conf";
+    }
+    if("authentication".equals(protection)) {
+      return "auth";
+    }
+    throw new IllegalArgumentException("Unrecognized rpc protection level: "+protection);
+  }
+
 
   public void sendHello(Channel channel) {
     byte[] connectionHeader = {'s', 'r', 'p', 'c', 4};
@@ -119,54 +136,55 @@ final class SecurityHelper implements ChannelFutureListener {
       buffer.writeInt(challengeBytes.length);
       buffer.writeBytes(challengeBytes);
       Channels.write(channel, buffer);
+      LOG.debug("-->handleSaslResponse:sending: "+Bytes.pretty(buf));
     }
   }
 
-  public boolean handleResponse(ChannelBuffer buf, Channel chan) {
-    final int readIdx = buf.readerIndex();
-    final int rpcid = buf.readInt();
-    LOG.debug(String.format("rpcid: %d", rpcid));
-    if(rpcid == SASL_RPC_ID) {
-        //read rpc state
-        int state = buf.readInt();
-        //0 is success
-        LOG.debug("Got SASL RPC state=" + state);
-        if(state != 0) {
-          return false;
+  public ChannelBuffer handleResponse(ChannelBuffer buf, Channel chan) {
+    if(!saslClient.isComplete()) {
+      final int readIdx = buf.readerIndex();
+      final int rpcid = buf.readInt();
+      LOG.debug(String.format("rpcid: %d", rpcid));
+
+      //read rpc state
+      int state = buf.readInt();
+      //0 is success
+      LOG.debug("Got SASL RPC state=" + state);
+      if(state != 0) {
+        buf.readerIndex(readIdx);
+        return buf;
+      }
+      int len = buf.readInt();
+      LOG.debug("handleSaslResponse:Got len="+len);
+      final byte[] b = new byte[len];
+      buf.readBytes(b);
+      LOG.debug("-->Got challenge: "+Bytes.pretty(b));
+
+      byte[] challengeBytes = processChallenge(b);
+
+      LOG.debug("isComplete: "+saslClient.isComplete());
+      if(challengeBytes != null) {
+        byte[] outBytes = new byte[4 + challengeBytes.length];
+        ChannelBuffer outBuffer = ChannelBuffers.wrappedBuffer(outBytes);
+        outBuffer.clear();
+        outBuffer.writeInt(challengeBytes.length);
+        outBuffer.writeBytes(challengeBytes);
+        LOG.debug("-->handleSaslResponse:sending: "+Bytes.pretty(outBytes));
+        Channels.write(chan, outBuffer);
+      }
+      if(saslClient.isComplete()) {
+        String qop = (String) saslClient.getNegotiatedProperty(Sasl.QOP);
+        useWrap = qop != null && !"auth".equalsIgnoreCase(qop);
+        if (LOG.isDebugEnabled()) {
+          LOG.debug("SASL client context established. Negotiated QoP: " + qop);
         }
-
-        if(!saslCompleted) {
-          int len = buf.readInt();
-          LOG.debug("handleSaslResponse:Got len="+len);
-
-          final byte[] b = buf.readBytes(len).array();
-          byte[] challengeBytes = processChallenge(b);
-
-          if(challengeBytes != null) {
-            byte[] outBytes = new byte[4 + challengeBytes.length];
-            ChannelBuffer outBuffer = ChannelBuffers.wrappedBuffer(outBytes);
-            outBuffer.clear();
-            outBuffer.writeInt(challengeBytes.length);
-            outBuffer.writeBytes(challengeBytes);
-            LOG.debug("-->handleSaslResponse:sending: "+Bytes.pretty(challengeBytes));
-            Channels.write(chan, outBuffer);
-          }
-          if(saslClient.isComplete()) {
-            sendRPCHeader(chan);
-            regionClient.sendVersion(chan);
-          }
-          saslCompleted = challengeBytes == null;
-          if(!saslCompleted) {
-            return true;
-          }
-        } else {
-          throw new IllegalStateException(
-              "SASL handshake complete but still receiving SASL messages");
-        }
-    } else {
-      buf.readerIndex(readIdx);
+        sendRPCHeader(chan);
+        regionClient.sendVersion(chan);
+      }
+      return null;
     }
-    return false;
+
+    return unwrap(buf);
   }
 
   private byte[] processChallenge(final byte[] b) {
@@ -208,12 +226,9 @@ final class SecurityHelper implements ChannelFutureListener {
     outBuffer.writeByte(0);
     //write length
     outBuffer.setInt(0, outBuffer.writerIndex() - 4);
+    outBuffer = wrap(outBuffer);
     LOG.debug("-->handleSaslResponse:sending: "+Bytes.pretty(outBuffer));
     Channels.write(channel, outBuffer);
-  }
-
-  @Override
-  public void operationComplete(ChannelFuture channelFuture) throws Exception {
   }
 
   // The CallbackHandler interface here refers to
@@ -283,7 +298,40 @@ final class SecurityHelper implements ChannelFutureListener {
       }
   }
 
-  public static boolean isHBaseSecurityEnabled() {
+  public ChannelBuffer unwrap(ChannelBuffer buf) {
+    if(!useWrap) {
+      return buf;
+    }
+    int len = buf.readInt();
+    try {
+      LOG.debug("-->un-unwrapped: "+Bytes.pretty(buf));
+      buf =  ChannelBuffers.wrappedBuffer(saslClient.unwrap(buf.readBytes(len).array(), 0, len));
+      LOG.debug("-->unwrapped: "+Bytes.pretty(buf));
+      return buf;
+    } catch (SaslException e) {
+      throw new IllegalStateException("Failed to unwrap payload", e);
+    }
+  }
+
+  public ChannelBuffer wrap(ChannelBuffer buf) {
+    if(!useWrap) {
+      return buf;
+    }
+    try {
+      byte[] payload = buf.array();
+      byte[] b = saslClient.wrap(payload, 0, payload.length);
+      byte[] wrapped = new byte[4 + b.length];
+      ChannelBuffer buff = ChannelBuffers.wrappedBuffer(wrapped);
+      buff.clear();
+      buff.writeInt(b.length);
+      buff.writeBytes(b);
+      return buff;
+    } catch (SaslException e) {
+      throw new IllegalStateException("Failed to wrap payload", e);
+    }
+  }
+
+  public static boolean parseAuthentication() {
     return Boolean.valueOf(System.getProperty(SECURITY_AUTHENTICATION_KEY, "kerberos"));
   }
 }

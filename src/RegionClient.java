@@ -904,7 +904,7 @@ final class RegionClient extends ReplayingDecoder<VoidEnum> {
                                final ChannelStateEvent e) {
     final Channel chan = e.getChannel();
     final ChannelBuffer header;
-    if(System.getProperty("org.hbase.async.security") != null) {
+    if(System.getProperty("org.hbase.async.security.94") != null) {
       useSecure = true;
       securityHelper = new SecurityHelper(this, host);
       securityHelper.sendHello(chan);
@@ -1142,6 +1142,12 @@ final class RegionClient extends ReplayingDecoder<VoidEnum> {
         oldrpc.callback(new NonRecoverableException(wtf));
       }
     }
+    if(useSecure) {
+      payload = securityHelper.wrap(payload);
+      LOG.debug("Sending Wrapped RPC #" + rpcid + ", payload=" + payload + ' '
+                + Bytes.pretty(payload));
+      return payload;
+    }
     return payload;
   }
 
@@ -1161,16 +1167,17 @@ final class RegionClient extends ReplayingDecoder<VoidEnum> {
   @Override
   protected Object decode(final ChannelHandlerContext ctx,
                           final Channel chan,
-                          final ChannelBuffer buf,
+                          ChannelBuffer buf,
                           final VoidEnum unused) {
-    final int rdx = buf.readerIndex();
     final long start = System.nanoTime();
     LOG.debug("------------------>> ENTERING DECODE >>------------------");
     if(useSecure) {
-      if(securityHelper.handleResponse(buf, chan)) {
+      buf = securityHelper.handleResponse(buf, chan);
+      if(buf == null) {
         return null;
       }
     }
+    final int rdx = buf.readerIndex();
     final int rpcid = buf.readInt();
     final Object decoded = deserialize(buf, rpcid);
     final HBaseRpc rpc = rpcs_inflight.remove(rpcid);
