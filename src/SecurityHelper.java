@@ -3,8 +3,6 @@ package org.hbase.async;
 import org.jboss.netty.buffer.ChannelBuffer;
 import org.jboss.netty.buffer.ChannelBuffers;
 import org.jboss.netty.channel.Channel;
-import org.jboss.netty.channel.ChannelFuture;
-import org.jboss.netty.channel.ChannelFutureListener;
 import org.jboss.netty.channel.Channels;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -76,9 +74,8 @@ final class SecurityHelper {
 
     //create saslClient
     try {
-      final Map<String, String> props =
-        new TreeMap<String, String>();
       //sasl configuration
+      final Map<String, String> props = new TreeMap<String, String>();
       props.put(Sasl.QOP, parseQOP());
       props.put(Sasl.SERVER_AUTH, "true");
 
@@ -231,6 +228,47 @@ final class SecurityHelper {
     Channels.write(channel, outBuffer);
   }
 
+  public ChannelBuffer unwrap(ChannelBuffer buf) {
+    if(!useWrap) {
+      return buf;
+    }
+    int len = buf.readInt();
+    try {
+      LOG.debug("-->un-unwrapped: "+Bytes.pretty(buf));
+      buf =  ChannelBuffers.wrappedBuffer(saslClient.unwrap(buf.readBytes(len).array(), 0, len));
+      LOG.debug("-->unwrapped: "+Bytes.pretty(buf));
+      return buf;
+    } catch (SaslException e) {
+      throw new IllegalStateException("Failed to unwrap payload", e);
+    }
+  }
+
+  public ChannelBuffer wrap(ChannelBuffer buf) {
+    if(!useWrap) {
+      return buf;
+    }
+    try {
+
+      byte[] payload = new byte[buf.writerIndex()];
+      buf.readBytes(payload);
+      byte[] b = saslClient.wrap(payload, 0, payload.length);
+      byte[] wrapped = new byte[4 + b.length];
+      LOG.debug("-->prewrapped: "+Bytes.pretty(buf));
+      ChannelBuffer buff = ChannelBuffers.wrappedBuffer(wrapped);
+      buff.clear();
+      buff.writeInt(b.length);
+      buff.writeBytes(b);
+      LOG.debug("-->wrapped: "+Bytes.pretty(buff));
+      return buff;
+    } catch (SaslException e) {
+      throw new IllegalStateException("Failed to wrap payload", e);
+    }
+  }
+
+  public static boolean parseAuthentication() {
+    return Boolean.valueOf(System.getProperty(SECURITY_AUTHENTICATION_KEY, "kerberos"));
+  }
+
   // The CallbackHandler interface here refers to
   // javax.security.auth.callback.CallbackHandler.
   public static class ClientCallbackHandler implements CallbackHandler {
@@ -296,42 +334,5 @@ final class SecurityHelper {
               }
           }
       }
-  }
-
-  public ChannelBuffer unwrap(ChannelBuffer buf) {
-    if(!useWrap) {
-      return buf;
-    }
-    int len = buf.readInt();
-    try {
-      LOG.debug("-->un-unwrapped: "+Bytes.pretty(buf));
-      buf =  ChannelBuffers.wrappedBuffer(saslClient.unwrap(buf.readBytes(len).array(), 0, len));
-      LOG.debug("-->unwrapped: "+Bytes.pretty(buf));
-      return buf;
-    } catch (SaslException e) {
-      throw new IllegalStateException("Failed to unwrap payload", e);
-    }
-  }
-
-  public ChannelBuffer wrap(ChannelBuffer buf) {
-    if(!useWrap) {
-      return buf;
-    }
-    try {
-      byte[] payload = buf.array();
-      byte[] b = saslClient.wrap(payload, 0, payload.length);
-      byte[] wrapped = new byte[4 + b.length];
-      ChannelBuffer buff = ChannelBuffers.wrappedBuffer(wrapped);
-      buff.clear();
-      buff.writeInt(b.length);
-      buff.writeBytes(b);
-      return buff;
-    } catch (SaslException e) {
-      throw new IllegalStateException("Failed to wrap payload", e);
-    }
-  }
-
-  public static boolean parseAuthentication() {
-    return Boolean.valueOf(System.getProperty(SECURITY_AUTHENTICATION_KEY, "kerberos"));
   }
 }
