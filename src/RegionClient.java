@@ -1233,7 +1233,13 @@ final class RegionClient extends ReplayingDecoder<VoidEnum> {
     //   0x00  Old style success (prior 0.92).
     //   0x01  RPC failed with an exception.
     //   0x02  New style success (0.92 and above).
-    final int flags = buf.readInt();
+    final int flags;
+    if (useSecure) {
+      //0.94-security uses an int for the flag section
+      flags = buf.readInt();
+    } else {
+      flags = buf.readByte();
+    }
     LOG.debug(String.format("deserialize:flag: %x", flags));
     if ((flags & HBaseRpc.RPC_FRAMED) != 0) {
       // Total size of the response, including the RPC ID (4 bytes) and flags
