@@ -1069,7 +1069,7 @@ final class RegionClient extends ReplayingDecoder<VoidEnum> {
    * @return The buffer to write to the channel or {@code null} if there was
    * an error and there's nothing to write.
    */
-  ChannelBuffer encode(final HBaseRpc rpc) {
+  private ChannelBuffer encode(final HBaseRpc rpc) {
     if (!rpc.hasDeferred()) {
       throw new AssertionError("Should never happen!  rpc=" + rpc);
     }
@@ -1143,9 +1143,6 @@ final class RegionClient extends ReplayingDecoder<VoidEnum> {
     }
     if(useSecure) {
       payload = securityHelper.wrap(payload);
-      LOG.debug("Sending Wrapped RPC #" + rpcid + ", payload=" + payload + ' '
-                + Bytes.pretty(payload));
-      return payload;
     }
     return payload;
   }
@@ -1166,8 +1163,9 @@ final class RegionClient extends ReplayingDecoder<VoidEnum> {
   @Override
   protected Object decode(final ChannelHandlerContext ctx,
                           final Channel chan,
-                          ChannelBuffer buf,
+                          final ChannelBuffer channelBuffer,
                           final VoidEnum unused) {
+    ChannelBuffer buf = channelBuffer;
     final long start = System.nanoTime();
     LOG.debug("------------------>> ENTERING DECODE >>------------------");
     if(useSecure) {
@@ -1257,7 +1255,7 @@ final class RegionClient extends ReplayingDecoder<VoidEnum> {
     }
 
     final HBaseRpc rpc = rpcs_inflight.get(rpcid);
-    if (flags != 0) {
+    if ((flags & HBaseRpc.RPC_ERROR) != 0) {
       return deserializeException(buf, rpc);
     }
     try {
@@ -1295,9 +1293,7 @@ final class RegionClient extends ReplayingDecoder<VoidEnum> {
   @SuppressWarnings("fallthrough")
   static Object deserializeObject(final ChannelBuffer buf,
                                   final HBaseRpc request) {
-    byte b = buf.readByte();
-    LOG.debug(String.format("object: %x", b));
-    switch (b) {  // Read the type of the response.
+    switch (buf.readByte()) {  // Read the type of the response.
       case  1:  // Boolean
         return buf.readByte() != 0x00;
       case  6:  // Long
@@ -1504,8 +1500,6 @@ final class RegionClient extends ReplayingDecoder<VoidEnum> {
 
   /** Initial part of the header.  */
   private final static byte[] HRPC3 = new byte[] { 'h', 'r', 'p', 'c', 3 };
-  /** Initial part of the secure header.  */
-  private final static byte[] SRPC4 = new byte[] { 's', 'r', 'p', 'c', 4 };
 
   /** Common part of the hello header: magic + version.  */
   private ChannelBuffer commonHeader(final byte[] buf, final byte[] hrpc) {
@@ -1516,28 +1510,6 @@ final class RegionClient extends ReplayingDecoder<VoidEnum> {
     // "hrpc" followed by the version.
     // See HBaseServer#HEADER and HBaseServer#CURRENT_VERSION.
     header.writeBytes(hrpc);  // 4 + 1
-    return header;
-  }
-
-  /** Hello header for HBase 0.92 and later.  */
-  private ChannelBuffer secureHeader092() {
-    byte[] buf = new byte[4 + 1 + 1 + 4 + 1 + 44];
-    final ChannelBuffer header = commonHeader(buf, SRPC4);
-
-
-    //authmethod 81=kerberos
-    header.writeByte(81);
-    // Serialized ipc.ConnectionHeader
-    // We skip 4 bytes now and will set it to the actual size at the end.
-    header.writerIndex(header.writerIndex() + 4);  // 4
-    final String klass = "org.apache.hadoop.hbase.ipc.HRegionInterface";
-    header.writeByte(klass.length());              // 1
-    header.writeBytes(Bytes.ISO88591(klass));      // 44
-
-    // Now set the length of the whole damn thing.
-    // -4 because the length itself isn't part of the payload.
-    // -5 because the "hrpc" + version isn't part of the payload.
-    header.setInt(5, header.writerIndex() - 4 - 6);
     return header;
   }
 
