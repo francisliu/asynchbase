@@ -148,7 +148,6 @@ test_classes_with_nested_classes := $(test_classes:$(top_builddir)/%.class=%*.cl
 
 run: $(test_classes)
 	@test -n "$(CLASS)" || { echo 'usage: $(MAKE) run CLASS=<name>'; exit 1; }
-	echo "$(JAVA) -ea -esa $(JVM_ARGS) -cp "$(get_runtime_dep_classpath):$(top_builddir)" $(package).test.$(CLASS) $(ARGS)"
 	$(JAVA) -ea -esa $(JVM_ARGS) -cp "$(get_runtime_dep_classpath):$(top_builddir)" $(package).test.$(CLASS) $(ARGS)
 
 cli:

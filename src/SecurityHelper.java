@@ -26,54 +26,92 @@ import java.security.PrivilegedExceptionAction;
 import java.util.Map;
 import java.util.TreeMap;
 
+/**
+ * This class provides the logic needed to interface
+ * with SASL supported RPC versions. It is used by RegionClient
+ * to perform RPC handshaking as well as wrapping/unwrapping
+ * the rpc payload depending on the selected QOP level.
+ * <BR/>
+ * Presently only 0.94-security is currently supported.
+ * Enable it by setting the following system property:
+ * <BR/>
+ * <B>org.hbase.async.security.94</B>
+ *
+ * The following configurations need to be set as system properties.
+ * <ul>
+ *   <li>hbase.security.authentication=&lt;MECHANISM&gt;</li>
+ *   <li>hbase.kerberos.regionserver.principal=&lt;REGIONSERVER PRINCIPAL&gt;</li>
+ *   <li>hbase.rpc.protection=[authentication|integrity|privacy]</li>
+ *   <li>hbase.sasl.clientconfig=&lt;JAAS Profile Name&gt;</li>
+ *   <li>java.security.auth.login.config=&lt;Path to JAAS conf&gt;</li>
+ * </ul>
+ * ie
+ * <BR/>
+ * <ul>
+ *   <li>hbase.security.authentication=kerberos</li>
+ *   <li>hbase.kerberos.regionserver.principal=hbase/_HOST@MYREALM.COM</li>
+ *   <li>hbase.rpc.protection=authentication</li>
+ *   <li>hbase.sasl.clientconfig=Client</li>
+ *   <li>java.security.auth.login.config=/path/to/jaas.conf</li>
+ * </ul>
+ */
 final class SecurityHelper {
 
-  private static final Logger LOG = LoggerFactory.getLogger(RegionClient.class);
+  private static final Logger LOG = LoggerFactory.getLogger(SecurityHelper.class);
   public static final String SECURITY_AUTHENTICATION_KEY = "hbase.security.authentication";
   public static final String REGIONSERVER_PRINCIPAL_KEY = "hbase.kerberos.regionserver.principal";
   public static final String RPC_QOP_KEY = "hbase.rpc.protection";
 
-  private static int SASL_RPC_ID = -33;
-
   private final SaslClient saslClient;
   private final String clientPrincipalName;
   private final Login clientLogin;
+  private final boolean useWrap;
 
-  private RegionClient regionClient;
 
-  private volatile boolean useWrap = false;
+  private final RegionClient regionClient;
+  private final String hostname;
+
 
   public SecurityHelper(RegionClient regionClient, String iphost) {
-    String host;
     this.regionClient = regionClient;
 
-    //Login if needed
+    //Login with jaas conf if needed
     try {
-      host = InetAddress.getByName(iphost).getCanonicalHostName();
       Login.initUserIfNeeded(System.getProperty(Login.LOGIN_CONTEXT_NAME_KEY),
           new ClientCallbackHandler(null));
     } catch (LoginException e) {
       throw new IllegalStateException("Failed to get login context", e);
+    }
+
+    //We might need hostname for _HOST substituation in regionserver principal
+    try {
+      hostname = InetAddress.getByName(iphost).getCanonicalHostName();
     } catch (UnknownHostException e) {
       throw new IllegalStateException("Failed to resolve hostname for: "+iphost, e);
     }
 
+
+    //-- Prepare principals needed for SaslClient --
     clientLogin = Login.getCurrLogin();
     final Principal clientPrincipal =
        (Principal)clientLogin.getSubject().getPrincipals().toArray()[0];
     final String serverPrincipal =
-        System.getProperty(REGIONSERVER_PRINCIPAL_KEY, "Client")
-        .replaceAll("_HOST", host);
+        System.getProperty(REGIONSERVER_PRINCIPAL_KEY, "Client").replaceAll("_HOST", hostname);
 
     LOG.debug("Connecting to "+serverPrincipal);
+
     final KerberosName clientKerberosName = new KerberosName(clientPrincipal.getName());
     final KerberosName serviceKerberosName = new KerberosName(serverPrincipal);
     final String serviceName = serviceKerberosName.getServiceName();
     final String serviceHostname = serviceKerberosName.getHostName();
     clientPrincipalName = clientKerberosName.toString();
 
-    //create saslClient
+    //-- create SaslClient --
     try {
+      //Get QOP
+      String qop = parseQOP();
+      useWrap = qop != null && !"auth".equalsIgnoreCase(qop);
+
       //sasl configuration
       final Map<String, String> props = new TreeMap<String, String>();
       props.put(Sasl.QOP, parseQOP());
@@ -132,21 +170,23 @@ final class SecurityHelper {
       buffer.clear();
       buffer.writeInt(challengeBytes.length);
       buffer.writeBytes(challengeBytes);
+
+      LOG.debug("Sending initial SASL Challenge: "+Bytes.pretty(buf));
       Channels.write(channel, buffer);
-      LOG.debug("-->handleSaslResponse:sending: "+Bytes.pretty(buf));
     }
   }
 
   public ChannelBuffer handleResponse(ChannelBuffer buf, Channel chan) {
     if(!saslClient.isComplete()) {
       final int readIdx = buf.readerIndex();
+      //RPCID is always -33 during SASL handshake
       final int rpcid = buf.readInt();
-      LOG.debug(String.format("rpcid: %d", rpcid));
 
       //read rpc state
       int state = buf.readInt();
+
       //0 is success
-      LOG.debug("Got SASL RPC state=" + state);
+      //If unsuccessful let common exception handling do the work
       if(state != 0) {
         buf.readerIndex(readIdx);
         return buf;
@@ -155,23 +195,21 @@ final class SecurityHelper {
       LOG.debug("handleSaslResponse:Got len="+len);
       final byte[] b = new byte[len];
       buf.readBytes(b);
-      LOG.debug("-->Got challenge: "+Bytes.pretty(b));
+      LOG.debug("Got SASL challenge: "+Bytes.pretty(b));
 
       byte[] challengeBytes = processChallenge(b);
 
-      LOG.debug("isComplete: "+saslClient.isComplete());
       if(challengeBytes != null) {
         byte[] outBytes = new byte[4 + challengeBytes.length];
+        LOG.debug("Sending SASL response: "+Bytes.pretty(outBytes));
         ChannelBuffer outBuffer = ChannelBuffers.wrappedBuffer(outBytes);
         outBuffer.clear();
         outBuffer.writeInt(challengeBytes.length);
         outBuffer.writeBytes(challengeBytes);
-        LOG.debug("-->handleSaslResponse:sending: "+Bytes.pretty(outBytes));
         Channels.write(chan, outBuffer);
       }
       if(saslClient.isComplete()) {
         String qop = (String) saslClient.getNegotiatedProperty(Sasl.QOP);
-        useWrap = qop != null && !"auth".equalsIgnoreCase(qop);
         if (LOG.isDebugEnabled()) {
           LOG.debug("SASL client context established. Negotiated QoP: " + qop);
         }
@@ -224,42 +262,57 @@ final class SecurityHelper {
     //write length
     outBuffer.setInt(0, outBuffer.writerIndex() - 4);
     outBuffer = wrap(outBuffer);
-    LOG.debug("-->handleSaslResponse:sending: "+Bytes.pretty(outBuffer));
+    if(LOG.isDebugEnabled()) {
+      LOG.debug("Sending RPC Header: "+Bytes.pretty(outBuffer));
+    }
     Channels.write(channel, outBuffer);
   }
 
-  public ChannelBuffer unwrap(ChannelBuffer buf) {
+  /**
+   * When QOP of auth-int or auth-conf is selected
+   * This is used to unwrap the contents from the passed
+   * buffer payload.
+   */
+  public ChannelBuffer unwrap(ChannelBuffer payload) {
     if(!useWrap) {
-      return buf;
+      return payload;
     }
-    int len = buf.readInt();
+
+    int len = payload.readInt();
     try {
-      LOG.debug("-->un-unwrapped: "+Bytes.pretty(buf));
-      buf =  ChannelBuffers.wrappedBuffer(saslClient.unwrap(buf.readBytes(len).array(), 0, len));
-      LOG.debug("-->unwrapped: "+Bytes.pretty(buf));
-      return buf;
+      payload =
+          ChannelBuffers.wrappedBuffer(saslClient.unwrap(payload.readBytes(len).array(), 0, len));
+      if (LOG.isDebugEnabled()) {
+        LOG.debug("Unwrapped payload: "+Bytes.pretty(payload));
+      }
+      return payload;
     } catch (SaslException e) {
       throw new IllegalStateException("Failed to unwrap payload", e);
     }
   }
 
-  public ChannelBuffer wrap(ChannelBuffer buf) {
+  /**
+   * When QOP of auth-int or auth-conf is selected
+   * This is used to wrap the contents
+   * into the proper payload (ie encryption, signature, etc)
+   */
+  public ChannelBuffer wrap(ChannelBuffer content) {
     if(!useWrap) {
-      return buf;
+      return content;
     }
-    try {
 
-      byte[] payload = new byte[buf.writerIndex()];
-      buf.readBytes(payload);
-      byte[] b = saslClient.wrap(payload, 0, payload.length);
-      byte[] wrapped = new byte[4 + b.length];
-      LOG.debug("-->prewrapped: "+Bytes.pretty(buf));
-      ChannelBuffer buff = ChannelBuffers.wrappedBuffer(wrapped);
-      buff.clear();
-      buff.writeInt(b.length);
-      buff.writeBytes(b);
-      LOG.debug("-->wrapped: "+Bytes.pretty(buff));
-      return buff;
+    try {
+      byte[] payload = new byte[content.writerIndex()];
+      content.readBytes(payload);
+      byte[] wrapped = saslClient.wrap(payload, 0, payload.length);
+      ChannelBuffer ret = ChannelBuffers.wrappedBuffer(new byte[4 + wrapped.length]);
+      ret.clear();
+      ret.writeInt(wrapped.length);
+      ret.writeBytes(wrapped);
+      if (LOG.isDebugEnabled()) {
+        LOG.debug("Wrapped payload: "+Bytes.pretty(ret));
+      }
+      return ret;
     } catch (SaslException e) {
       throw new IllegalStateException("Failed to wrap payload", e);
     }

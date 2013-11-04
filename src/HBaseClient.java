@@ -2379,7 +2379,7 @@ public final class HBaseClient {
     final SocketChannelConfig config = chan.getConfig();
     config.setConnectTimeoutMillis(5000);
     //TODO we need this to be true
-    config.setTcpNoDelay(false);
+    config.setTcpNoDelay(true);
     config.setKeepAlive(true);  // TODO(tsuna): Is this really needed?
     chan.connect(new InetSocketAddress(host, port));  // Won't block.
     return client;

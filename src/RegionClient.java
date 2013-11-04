@@ -525,7 +525,6 @@ final class RegionClient extends ReplayingDecoder<VoidEnum> {
           + (v <= 0 ? "negative" : "too large") + " value", version);
       }
       server_version = (byte) v;
-      System.out.println("-->got server version:"+server_version);
       // The following line will make this client no longer queue incoming
       // RPCs, as we're now ready to communicate with the server.
       RegionClient.this.chan = this.chan;  // Volatile write.
