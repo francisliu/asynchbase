@@ -16,18 +16,6 @@
  * limitations under the License.
  */
 
-/* This file copied from Hadoop's security branch,
-  * with the following changes:
-  * 1. package changed from org.apache.hadoop.util to
-  *    org.apache.zookeeper.
-  * 2. Usage of Hadoop's Configuration class removed since
-  *    it is not available in Zookeeper: instead, system properties
-  *    are used.
-  * 3. The deprecated getUlimitMemoryCommand() method removed since
-  *    it is not needed.
-  */
-
-
 package org.hbase.async;
 
 import java.io.BufferedReader;
@@ -46,6 +34,9 @@ import org.slf4j.LoggerFactory;
  * <code>Shell</code> can be used to run unix commands like <code>du</code> or
  * <code>df</code>. It also offers facilities to gate commands by 
  * time-intervals.
+ *
+ * This class was culled from zookeeper which was culled from hadoop with some slight changes.
+ * This class is only needed by the Login class to invoke "kinit" in the shell.
  */
 abstract public class Shell {
   

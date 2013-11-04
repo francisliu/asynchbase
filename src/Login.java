@@ -18,12 +18,7 @@
 
 package org.hbase.async;
 
-/** 
- * This class is responsible for refreshing Kerberos credentials for
- * logins for both Zookeeper client and server.
- * See ZooKeeperSaslServer for server-side usage.
- * See ZooKeeperSaslClient for client-side usage.
- */
+
 
 import javax.security.auth.kerberos.KerberosPrincipal;
 import javax.security.auth.login.AppConfigurationEntry;
@@ -40,6 +35,12 @@ import java.util.Date;
 import java.util.Random;
 import java.util.Set;
 
+/**
+ * This class is responsible for refreshing Kerberos credentials for
+ * logins.
+ *
+ * This class was culled from zookeeper which was culled from hadoop with some slight changes.
+ */
 public class Login {
   private static final org.slf4j.Logger LOG = LoggerFactory.getLogger(RegionClient.class);
 
@@ -160,8 +161,7 @@ public class Login {
                         if ((isUsingTicketCache) && (tgt.getEndTime().equals(tgt.getRenewTill()))) {
                             LOG.error("The TGT cannot be renewed beyond the next expiry date: " + expiryDate + "." +
                                     "This process will not be able to authenticate new SASL connections after that " +
-                                    "time (for example, it will not be authenticate a new connection with a Zookeeper " +
-                                    "Quorum member).  Ask your system administrator to either increase the " +
+                                    "time. Ask your system administrator to either increase the " +
                                     "'renew until' time by doing : 'modprinc -maxrenewlife " + principal + "' within " +
                                     "kadmin, or instead, to generate a keytab for " + principal + ". Because the TGT's " +
                                     "expiry cannot be further extended by refreshing, exiting refresh thread now.");
@@ -214,8 +214,8 @@ public class Login {
                     }
                     if (isUsingTicketCache) {
                         String cmd = "/usr/bin/kinit";
-                        if (System.getProperty("zookeeper.kinit") != null) {
-                            cmd = System.getProperty("zookeeper.kinit");
+                        if (System.getProperty("hbase.kinit") != null) {
+                            cmd = System.getProperty("hbase.kinit");
                         }
                         String kinitArgs = "-R";
                         int retry = 1;

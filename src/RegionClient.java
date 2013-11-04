@@ -1240,7 +1240,6 @@ final class RegionClient extends ReplayingDecoder<VoidEnum> {
     } else {
       flags = buf.readByte();
     }
-    LOG.debug(String.format("deserialize:flag: %x", flags));
     if ((flags & HBaseRpc.RPC_FRAMED) != 0) {
       // Total size of the response, including the RPC ID (4 bytes) and flags
       // (1 byte) that we've already read, including the 4 bytes used by

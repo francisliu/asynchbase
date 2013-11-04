@@ -137,13 +137,13 @@ final class SecurityHelper {
   private String parseQOP() {
     String protection = System.getProperty(RPC_QOP_KEY, "authentication");
 
-    if("integrity".equals(protection)) {
+    if ("integrity".equals(protection)) {
       return "auth-int";
     }
-    if("privacy".equals(protection)) {
+    if ("privacy".equals(protection)) {
       return "auth-conf";
     }
-    if("authentication".equals(protection)) {
+    if ("authentication".equals(protection)) {
       return "auth";
     }
     throw new IllegalArgumentException("Unrecognized rpc protection level: "+protection);
@@ -161,10 +161,10 @@ final class SecurityHelper {
     Channels.write(channel, buffer);
 
     byte[] challengeBytes = null;
-    if(saslClient.hasInitialResponse()) {
+    if (saslClient.hasInitialResponse()) {
       challengeBytes = processChallenge(new byte[0]);
     }
-    if(challengeBytes != null) {
+    if (challengeBytes != null) {
       buf = new byte[4 + challengeBytes.length];
       buffer = ChannelBuffers.wrappedBuffer(buf);
       buffer.clear();
@@ -177,7 +177,7 @@ final class SecurityHelper {
   }
 
   public ChannelBuffer handleResponse(ChannelBuffer buf, Channel chan) {
-    if(!saslClient.isComplete()) {
+    if (!saslClient.isComplete()) {
       final int readIdx = buf.readerIndex();
       //RPCID is always -33 during SASL handshake
       final int rpcid = buf.readInt();
@@ -187,7 +187,7 @@ final class SecurityHelper {
 
       //0 is success
       //If unsuccessful let common exception handling do the work
-      if(state != 0) {
+      if (state != 0) {
         buf.readerIndex(readIdx);
         return buf;
       }
@@ -199,7 +199,7 @@ final class SecurityHelper {
 
       byte[] challengeBytes = processChallenge(b);
 
-      if(challengeBytes != null) {
+      if (challengeBytes != null) {
         byte[] outBytes = new byte[4 + challengeBytes.length];
         LOG.debug("Sending SASL response: "+Bytes.pretty(outBytes));
         ChannelBuffer outBuffer = ChannelBuffers.wrappedBuffer(outBytes);
@@ -208,7 +208,7 @@ final class SecurityHelper {
         outBuffer.writeBytes(challengeBytes);
         Channels.write(chan, outBuffer);
       }
-      if(saslClient.isComplete()) {
+      if (saslClient.isComplete()) {
         String qop = (String) saslClient.getNegotiatedProperty(Sasl.QOP);
         if (LOG.isDebugEnabled()) {
           LOG.debug("SASL client context established. Negotiated QoP: " + qop);
@@ -351,7 +351,7 @@ final class SecurityHelper {
                             " you still get this message after that, the TGT in the ticket cache has expired and must" +
                             " be manually refreshed. To do so, first determine if you are using a password or a" +
                             " keytab. If the former, run kinit in a Unix shell in the environment of the user who" +
-                            " is running this Zookeeper client using the command" +
+                            " is running this asynchbase client using the command" +
                             " 'kinit <princ>' (where <princ> is the name of the client's Kerberos principal)." +
                             " If the latter, do" +
                             " 'kinit -k -t <keytab> <princ>' (where <princ> is the name of the Kerberos principal, and" +

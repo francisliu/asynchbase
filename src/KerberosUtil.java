@@ -3,6 +3,12 @@ package org.hbase.async;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 
+/**
+ *
+ * Used to retrieve the default realm which is JVM specific.
+ *
+ * This class was culled from zookeeper which was culled from hadoop with some small changes.
+ */
 public class KerberosUtil {
 
   public static String getDefaultRealm()

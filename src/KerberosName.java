@@ -16,15 +16,6 @@
  * limitations under the License.
  */
 
- /* This file copied from Hadoop's security branch,
-  * with the following changes:
-  * 1. package changed from org.apache.hadoop.security to
-  *    org.apache.zookeeper.server.auth.
-  * 2. Usage of Hadoop's Configuration class removed since
-  *    it is not available in Zookeeper: instead, system property
-  *    "zookeeper.security.auth_to_local" is used.
-  */
-
 package org.hbase.async;
 
 import java.io.IOException;
@@ -37,6 +28,8 @@ import java.util.regex.Pattern;
  * This class implements parsing and handling of Kerberos principal names. In 
  * particular, it splits them apart and translates them down into local
  * operating system names.
+ *
+ * This class was culled from zookeeper which was culled from hadoop with some small changes.
  */
 public class KerberosName {
   /** The first component of the name */
@@ -82,8 +75,8 @@ public class KerberosName {
     try {
       defaultRealm = KerberosUtil.getDefaultRealm();
     } catch (Exception ke) {
-      if ((System.getProperty("zookeeper.requireKerberosConfig") != null) &&
-          (System.getProperty("zookeeper.requireKerberosConfig").equals("true"))) {
+      if ((System.getProperty("hbase.requireKerberosConfig") != null) &&
+          (System.getProperty("hbase.requireKerberosConfig").equals("true"))) {
         throw new IllegalArgumentException("Can't get Kerberos configuration",ke);
       }
       else
@@ -91,7 +84,7 @@ public class KerberosName {
     }
     try {
       // setConfiguration() will work even if the above try() fails due
-      // to a missing Kerberos configuration (unless zookeeper.requireKerberosConfig
+      // to a missing Kerberos configuration (unless hbase.requireKerberosConfig
       // is set to true, which would not allow execution to reach here due to the
       // throwing of an IllegalArgumentException above).
       setConfiguration();
@@ -353,7 +346,7 @@ public class KerberosName {
    * @throws IOException
    */
   public static void setConfiguration() throws IOException {
-    String ruleString = System.getProperty("zookeeper.security.auth_to_local", "DEFAULT");
+    String ruleString = System.getProperty("hbase.security.auth_to_local", "DEFAULT");
     rules = parseRules(ruleString);
   }
 
